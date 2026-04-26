@@ -155,23 +155,28 @@ that flips between the camera service and the normal streamdeck-ui
 layout. Snippet, if you want to crib it:
 
 ```ts
-// AGS, GTK 3
+// AGS, GTK 3 — Nerd Font glyphs: 󰞮 = md-cctv, 󱡟 = md-cctv_off
 function cameraToggle() {
     const btn = new Gtk.Button({ relief: Gtk.ReliefStyle.NONE })
-    const lbl = new Gtk.Label({ label: "󰻞" })   // nf-md-cctv
+    const lbl = new Gtk.Label({ label: "󰞮" })
     btn.add(lbl)
 
     const isOn = () => {
-        const [, out] = GLib.spawn_command_line_sync(
+        const [ok, out] = GLib.spawn_command_line_sync(
             "systemctl --user is-active streamdeck-camera.service")
-        return out && String(out).trim().startsWith("active")
+        if (!ok || !out) return false
+        return new TextDecoder().decode(out as any).trim() === "active"
     }
+
+    const refresh = () => lbl.set_label(isOn() ? "󰞮" : "󱡟")
+    refresh()
 
     btn.connect("clicked", () => {
         const cmd = isOn()
             ? "systemctl --user start streamdeck-ui.service"
             : "systemctl --user start streamdeck-camera.service"
         GLib.spawn_command_line_async(cmd)
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => { refresh(); return GLib.SOURCE_REMOVE })
     })
     return btn
 }
