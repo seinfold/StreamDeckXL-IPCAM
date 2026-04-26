@@ -23,9 +23,9 @@ to zoom further. Crop and threshold persist in
 
 ## Setup
 
-You need RTSP streaming IP camera, Stream Deck XL, `ffmpeg`, Python with `numpy` / `Pillow` /
-`python-elgato-streamdeck`. Linux Streamdeck GUI 
-[streamdeck-linux-gui](https://github.com/streamdeck-linux-gui/streamdeck-linux-gui)
+> You need RTSP streaming IP camera, Stream Deck XL, `ffmpeg`, Python with `numpy` / `Pillow` /
+> `python-elgato-streamdeck`. Linux Streamdeck GUI 
+> [streamdeck-linux-gui](https://github.com/streamdeck-linux-gui/streamdeck-linux-gui)
 
 On Arch:
 
@@ -52,10 +52,6 @@ systemctl --user start streamdeck-ui.service       # back to your normal layout
 
 The two units have `Conflicts=` set on each other, so starting one stops
 the other.
-
-> **Tapo cameras**: RTSP is off by default. Open the Tapo app → Advanced
-> Settings → Camera Account, set a username and password there. Use those
-> in the config — not your Tapo account credentials.
 
 ## Config
 
