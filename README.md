@@ -1,17 +1,11 @@
 # StreamDeckXL-IPCAM
 
-A Stream Deck XL has 32 tiny LCDs (8×4, 96px each) mostly going to waste, and
-a Tapo C310 watching the back of the house. So: 32 tiles, one camera.
-
 ![preview](docs/preview.webp)
 
 The script pulls an RTSP feed, slices each frame into 32 tiles, runs cheap
 per-tile motion detection, and pushes JPEGs to the deck at ~10 FPS. Tiles with
 motion get a red wash. Cropping and motion sensitivity are controlled from
-the deck itself — five buttons do everything; the rest is config.
-
-Tested with a TP-Link Tapo C310, but it's just RTSP — anything that exposes
-a stream URL should work.
+the deck itself. Five buttons do everything; the rest is config.
 
 ## On-deck controls
 
@@ -29,10 +23,9 @@ to zoom further. Crop and threshold persist in
 
 ## Setup
 
-You need a Stream Deck XL, `ffmpeg`, Python with `numpy` / `Pillow` /
-`python-elgato-streamdeck`. The udev rules for the deck come with
+You need RTSP streaming IP camera, Stream Deck XL, `ffmpeg`, Python with `numpy` / `Pillow` /
+`python-elgato-streamdeck`. Linux Streamdeck GUI 
 [streamdeck-linux-gui](https://github.com/streamdeck-linux-gui/streamdeck-linux-gui)
-— easiest to install that even if you won't use the GUI.
 
 On Arch:
 
@@ -151,6 +144,7 @@ For Waybar / Eww the same idea is a one-line custom module wrapping
   them.
 - About 30% of one core for the full 10 FPS pipeline. The bottleneck is
   encoding 32 small JPEGs and pushing them over USB, not RTSP decoding.
+- Tested and developed for environment that has Linux Arch running Hyprland and AGS with single camera.
 
 ## License
 
