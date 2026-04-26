@@ -4,7 +4,7 @@ Turn an Elgato Stream Deck XL into a tiny IP camera display, complete with
 per-tile motion detection. The deck's 32 keys (8×4) become a 768×384 video
 wall that streams an RTSP feed from any IP camera.
 
-![32 buttons, one camera feed.](docs/screenshot.png) <!-- TODO: add a screenshot -->
+![Stream Deck XL showing a live backyard camera feed across all 32 buttons, with the camera's overlay timestamp readable across the top row.](docs/preview.webp)
 
 Built and tested with a TP-Link TAPO C310, but the script just talks to
 RTSP — anything that exposes an RTSP URL should work.
