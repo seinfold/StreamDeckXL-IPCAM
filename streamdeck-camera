@@ -187,8 +187,10 @@ class State:
             self.y = float(data.get("y", 0))
             self.w = float(data.get("w", self.src_w))
             self.h = float(data.get("h", self.src_h))
-            if "threshold" in data:
-                self.threshold = float(data["threshold"])
+            # Accept both "threshold" and the legacy "motion_threshold" key.
+            t = data.get("threshold", data.get("motion_threshold"))
+            if t is not None:
+                self.threshold = float(t)
 
 
 def fit(roi, W, H, mode):
