@@ -1,62 +1,38 @@
 # StreamDeckXL-IPCAM
 
-Turn an Elgato Stream Deck XL into a tiny IP camera display, complete with
-per-tile motion detection. The deck's 32 keys (8×4) become a 768×384 video
-wall that streams an RTSP feed from any IP camera.
+A Stream Deck XL has 32 tiny LCDs (8×4, 96px each) mostly going to waste, and
+a Tapo C310 watching the back of the house. So: 32 tiles, one camera.
 
-![Stream Deck XL showing a live backyard camera feed across all 32 buttons, with the camera's overlay timestamp readable across the top row.](docs/preview.webp)
+![preview](docs/preview.webp)
 
-Built and tested with a TP-Link TAPO C310, but the script just talks to
-RTSP — anything that exposes an RTSP URL should work.
+The script pulls an RTSP feed, slices each frame into 32 tiles, runs cheap
+per-tile motion detection, and pushes JPEGs to the deck at ~10 FPS. Tiles with
+motion get a red wash. Cropping and motion sensitivity are controlled from
+the deck itself — five buttons do everything; the rest is config.
 
-## Features
+Tested with a TP-Link Tapo C310, but it's just RTSP — anything that exposes
+a stream URL should work.
 
-- RTSP → 32-tile video wall, ~10 FPS on modest hardware
-- Per-tile motion detection with a red wash on tiles that move
-- Crop / zoom controlled from the deck itself (corner buttons)
-- Sensitivity adjustable on the fly (top row, keys 3 and 4)
-- Crop and sensitivity persist across restarts
-- Plays nicely with [streamdeck-linux-gui](https://github.com/streamdeck-linux-gui/streamdeck-linux-gui)
-  — the script will stop the daemon while it runs and respawn it on exit
+## On-deck controls
 
-## Deck button layout
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ ◤ZOOM │ RESET │ −SENS │ +SENS │       │       │       │ ZOOM◥ │
-├─────────────────────────────────────────────────────────────────────────┤
-│       │       │       │       │       │       │       │       │
-├─────────────────────────────────────────────────────────────────────────┤
-│       │       │       │       │       │       │       │       │
-├─────────────────────────────────────────────────────────────────────────┤
-│ ◣ZOOM │       │       │       │       │       │       │ ZOOM◢ │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-| Key | Action |
+| key | what it does |
 | --- | --- |
-| 0 (top-left corner) | Zoom — drop top + left |
-| 7 (top-right corner) | Zoom — drop top + right |
-| 24 (bottom-left corner) | Zoom — drop bottom + left |
-| 31 (bottom-right corner) | Zoom — drop bottom + right |
-| 1 | Reset crop to full frame |
-| 2 | Less motion sensitivity (raise threshold) |
-| 3 | More motion sensitivity (lower threshold) |
+| corners (0, 7, 24, 31) | zoom in — the corner you press is the corner that gets cropped away |
+| 1 (top row, 2nd) | reset crop to the full frame |
+| 2 (top row, 3rd) | less motion sensitivity |
+| 3 (top row, 4th) | more motion sensitivity |
 
-The corner zoom shrinks the crop rectangle from the side(s) adjacent to
-the pressed corner — e.g. pressing the bottom-right corner cuts the
-bottom row and right column of the current crop.
+Press the bottom-right corner and the bottom row + right column of the current
+crop disappear; what's left scales up to fill the deck. Press a corner again
+to zoom further. Crop and threshold persist in
+`~/.cache/streamdeck-camera/state.json` — survives reboots.
 
-## Requirements
+## Setup
 
-- Stream Deck XL (the script bails out if it doesn't find one)
-- Linux with `udev` rules for Stream Deck access — easiest is to install
-  the [streamdeck-linux-gui](https://github.com/streamdeck-linux-gui/streamdeck-linux-gui)
-  package, which ships them
-- `ffmpeg` and `ffprobe`
-- Python 3 with `numpy`, `Pillow`, `python-elgato-streamdeck`
-- An RTSP source (most IP cameras have a hidden setting for this — on
-  TAPO cameras it's *Advanced Settings → Camera Account*)
+You need a Stream Deck XL, `ffmpeg`, Python with `numpy` / `Pillow` /
+`python-elgato-streamdeck`. The udev rules for the deck come with
+[streamdeck-linux-gui](https://github.com/streamdeck-linux-gui/streamdeck-linux-gui)
+— easiest to install that even if you won't use the GUI.
 
 On Arch:
 
@@ -64,7 +40,7 @@ On Arch:
 sudo pacman -S ffmpeg python-pillow python-numpy python-elgato-streamdeck streamdeck-ui
 ```
 
-## Install
+Then:
 
 ```sh
 git clone https://github.com/seinfold/StreamDeckXL-IPCAM.git
@@ -72,36 +48,32 @@ cd StreamDeckXL-IPCAM
 ./install.sh
 ```
 
-That puts the script in `~/.local/bin/`, drops the systemd unit files in
-`~/.config/systemd/user/`, and copies `config.example.ini` to
-`~/.config/streamdeck-camera/config.ini` if you don't already have one.
-
-Edit `~/.config/streamdeck-camera/config.ini` with your camera's RTSP
-URL (or host/user/pass), then:
+The installer drops the script in `~/.local/bin/`, two systemd user units in
+`~/.config/systemd/user/`, and seeds `~/.config/streamdeck-camera/config.ini`
+from the example. Fill in your camera details and:
 
 ```sh
-systemctl --user start streamdeck-camera.service
+systemctl --user start streamdeck-camera.service   # camera mode
+systemctl --user start streamdeck-ui.service       # back to your normal layout
 ```
 
-To toggle back to the normal Stream Deck UI layout:
+The two units have `Conflicts=` set on each other, so starting one stops
+the other.
 
-```sh
-systemctl --user start streamdeck-ui.service
-```
-
-The two services declare `Conflicts=` against each other, so starting
-one stops the other.
+> **Tapo cameras**: RTSP is off by default. Open the Tapo app → Advanced
+> Settings → Camera Account, set a username and password there. Use those
+> in the config — not your Tapo account credentials.
 
 ## Config
 
-Minimal config (full RTSP URL):
+Either give it a full RTSP URL:
 
 ```ini
 [camera]
 rtsp_url = rtsp://user:pass@192.168.1.10:554/stream2
 ```
 
-Or piecemeal — handy if you don't want passwords URL-encoded:
+Or split it out (easier if your password has URL-special characters):
 
 ```ini
 [camera]
@@ -112,108 +84,76 @@ port = 554
 stream = stream2
 ```
 
-The script auto-detects source resolution via `ffprobe` on startup. If
-ffprobe can't reach the camera fast enough you can pin it explicitly:
+Source resolution is auto-detected via ffprobe at startup. If your camera is
+slow to respond, pin it manually with `src_width` and `src_height`.
 
-```ini
-[camera]
-rtsp_url = rtsp://...
-src_width = 640
-src_height = 360
-```
-
-## CLI flags
+## Flags
 
 ```
---fps INT             frame rate cap (default: 10)
+--fps INT             default: 10
 --mode {fit,stretch,crop}
-                      how the cropped ROI fills the 768×384 canvas
-                      (default: stretch)
---brightness INT      0-100 (default: 80)
---motion-threshold N  initial sensitivity, 1-60 (default: 10)
---motion-alpha N      red blend alpha for motion tiles, 0-1 (default: 0.40)
---bg-learn-rate N     EMA rate for background model (default: 0.05)
---no-motion           disable the red motion overlay
+                      how the cropped ROI fills the 768×384 canvas (default: stretch)
+--brightness INT      0–100 (default: 80)
+--motion-threshold N  initial sensitivity, 1–60 (default: 10)
+--motion-alpha N      red blend alpha, 0–1 (default: 0.40)
+--bg-learn-rate N     EMA rate for the background model (default: 0.05)
+--no-motion           disable the red overlay
 --no-daemon-mgmt      don't touch streamdeck-linux-gui's daemon
 ```
 
 ## How motion detection works
 
-For each frame: compute a luminance image, maintain an EMA background
-model, take the absolute difference between current luminance and the
-background, then average that diff over each 96×96 tile. Tiles whose
-mean diff exceeds the threshold get a red blend.
+Per frame: convert to luminance, maintain an EMA "background" of luminance,
+take the absolute diff between current and background, average that diff
+over each 96×96 tile. Tiles whose average exceeds the threshold get the red
+blend. The background is invalidated whenever the crop changes — otherwise
+the first few frames after a zoom would falsely flag everything.
 
-When you change the crop, the background model is invalidated and
-rebuilt — otherwise the first frame after a zoom would falsely flag
-half the tiles as "moving."
+Coarse, but for outdoor scenes you can usually find a threshold (with
+keys 2 and 3) where leaves and clouds stay below the line and people /
+animals trip it.
 
-## Optional: AGS / Waybar / Hyprland integration
+## AGS bar toggle (optional)
 
-I've got a toggle button in my [AGS](https://github.com/Aylur/ags) bar
-that flips between the camera service and the normal streamdeck-ui
-layout. Snippet, if you want to crib it:
+I run [AGS](https://github.com/Aylur/ags) on Hyprland and added a button
+to the top bar that flips between camera mode and the normal layout.
+The widget is included in this repo:
 
-```ts
-// AGS, GTK 3 — Nerd Font glyphs: 󰞮 = md-cctv, 󱡟 = md-cctv_off
-function cameraToggle() {
-    const btn = new Gtk.Button({ relief: Gtk.ReliefStyle.NONE })
-    const lbl = new Gtk.Label({ label: "󰞮" })
-    btn.add(lbl)
+- [`integrations/ags/streamdeck-camera-button.ts`](integrations/ags/streamdeck-camera-button.ts) — the button widget
+- [`integrations/ags/style.css`](integrations/ags/style.css) — matching CSS
 
-    const isOn = () => {
-        const [ok, out] = GLib.spawn_command_line_sync(
-            "systemctl --user is-active streamdeck-camera.service")
-        if (!ok || !out) return false
-        return new TextDecoder().decode(out as any).trim() === "active"
-    }
+Drop the `.ts` into your AGS widgets directory, import `StreamdeckCameraButton`,
+add it to your bar's box, and append the CSS to your `style.css`. The button
+shows 󰞮 (md-cctv) when the service is running and 󱡟 (md-cctv-off) when it
+isn't — JetBrainsMono Nerd Font has both, and so do most current Nerd Fonts.
 
-    const refresh = () => lbl.set_label(isOn() ? "󰞮" : "󱡟")
-    refresh()
-
-    btn.connect("clicked", () => {
-        const cmd = isOn()
-            ? "systemctl --user start streamdeck-ui.service"
-            : "systemctl --user start streamdeck-camera.service"
-        GLib.spawn_command_line_async(cmd)
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => { refresh(); return GLib.SOURCE_REMOVE })
-    })
-    return btn
-}
-```
-
-For Hyprland autostart on login, add to `hyprland.conf`:
+For Hyprland autostart on login:
 
 ```
 exec-once = systemctl --user start streamdeck-camera.service
 ```
 
-## Troubleshooting
+For Waybar / Eww the same idea is a one-line custom module wrapping
+`systemctl --user is-active streamdeck-camera.service`.
 
-**`Stream Deck XL not found`**
-streamdeck-linux-gui's daemon is probably still holding the device.
-Either let the script manage it (default), or stop it manually:
-`pkill -f 'streamdeck --no-ui'`.
+## Notes
 
-**RTSP connects but no frames flow**
-Some cameras only stream after you set up an explicit "camera account"
-in their app. On TAPO it's *Advanced Settings → Camera Account*. The
-default web UI password does not work for RTSP.
-
-**Camera image looks stretched**
-That's `--mode stretch`. The user-driven crop quickly produces aspect
-ratios that don't match the deck's 2:1, so stretch is the most
-predictable default. Use `--mode fit` for letterboxing or `--mode crop`
-for fill-and-cut.
-
-**Motion overlay is too jumpy / not jumpy enough**
-Press key 2 (less sensitive) or key 3 (more sensitive) on the deck. The
-threshold persists. Or tune `--bg-learn-rate` — slower learning means
-slow movements register longer.
+- "Stream Deck XL not found" almost always means streamdeck-linux-gui's
+  daemon is still holding the device. Default behaviour is to stop it on
+  entry and respawn on exit; pass `--no-daemon-mgmt` to skip.
+- If RTSP connects but no frames flow, the credentials are wrong. The web
+  UI password rarely works for RTSP — most cameras hide a separate "camera
+  account" setting.
+- `--mode stretch` (the default) distorts the image when you crop. That's
+  intentional: cropping rarely lands on a 2:1 aspect ratio anyway, and the
+  alternatives (letterbox or fill-and-cut) are less useful for actually
+  watching the feed. `--mode fit` and `--mode crop` are there if you want
+  them.
+- About 30% of one core for the full 10 FPS pipeline. The bottleneck is
+  encoding 32 small JPEGs and pushing them over USB, not RTSP decoding.
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/)
-— free for any noncommercial use (personal projects, hobbies, research,
-nonprofits, education). Commercial use requires a separate license. See
-LICENSE for the full text.
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/).
+Free for personal, hobby, research, nonprofit, and educational use.
+Commercial use requires a separate license.
