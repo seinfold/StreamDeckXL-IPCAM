@@ -1,0 +1,381 @@
+#!/usr/bin/env python
+"""Pipe an RTSP camera feed onto a Stream Deck XL.
+
+Each of the 32 keys becomes a tile of the video. Tiles with motion get
+a red wash. Five buttons on the deck itself adjust the crop and motion
+sensitivity at runtime; everything else is config.
+"""
+
+import argparse
+import configparser
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+from StreamDeck.DeviceManager import DeviceManager
+from StreamDeck.ImageHelpers import PILHelper
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "streamdeck-camera"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "streamdeck-camera"
+CONFIG_PATH = CONFIG_DIR / "config.ini"
+STATE_PATH = CACHE_DIR / "state.json"
+
+
+def load_config():
+    """Read the camera config. Returns (rtsp_url, src_w, src_h_or_None)."""
+    if "CAMERA_RTSP_URL" in os.environ:
+        return os.environ["CAMERA_RTSP_URL"], None, None
+
+    if not CONFIG_PATH.exists():
+        sys.exit(f"No config at {CONFIG_PATH}. Copy config.example.ini there and fill it in, "
+                 f"or set CAMERA_RTSP_URL.")
+
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG_PATH)
+    if "camera" not in cfg:
+        sys.exit(f"{CONFIG_PATH}: missing [camera] section")
+    cam = cfg["camera"]
+
+    if cam.get("rtsp_url"):
+        url = cam["rtsp_url"]
+    else:
+        host = cam.get("host")
+        user = cam.get("user")
+        pwd = cam.get("pass")
+        port = cam.get("port", "554")
+        stream = cam.get("stream", "stream1")
+        if not (host and user and pwd):
+            sys.exit("config: need either rtsp_url, or host/user/pass")
+        url = f"rtsp://{user}:{pwd}@{host}:{port}/{stream}"
+
+    w = cam.getint("src_width", fallback=None)
+    h = cam.getint("src_height", fallback=None)
+    return url, w, h
+
+
+def probe_resolution(rtsp_url):
+    """Ask ffprobe for the stream's width/height. Falls back if it can't."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-rtsp_transport", "tcp",
+             "-i", rtsp_url, "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "default=noprint_wrappers=1:nokey=1"],
+            text=True, timeout=15,
+        )
+        nums = [int(x) for x in out.split() if x.strip().isdigit()]
+        if len(nums) >= 2:
+            return nums[0], nums[1]
+    except Exception as e:
+        print(f"ffprobe failed: {e}", file=sys.stderr)
+    return None
+
+
+# Stream Deck UI / streamdeck-linux-gui owns the device exclusively. If
+# you have it running normally, this script will (optionally) stop it on
+# entry and respawn it on exit so you don't lose your normal layout.
+STREAMDECK_DAEMON_CMD = ["streamdeck", "--no-ui"]
+
+
+def stop_streamdeck_daemon():
+    subprocess.run(["pkill", "-f", "streamdeck --no-ui"], check=False)
+    for _ in range(30):
+        if subprocess.run(["pgrep", "-f", "streamdeck --no-ui"],
+                          capture_output=True).returncode != 0:
+            return
+        time.sleep(0.1)
+
+
+def restart_streamdeck_daemon():
+    hyprctl = shutil.which("hyprctl")
+    if hyprctl and os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        subprocess.Popen([hyprctl, "dispatch", "exec", "streamdeck --no-ui"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(STREAMDECK_DAEMON_CMD,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+
+
+class State:
+    """ROI in source pixel coords + motion threshold. Mutated from the
+    deck's button-callback thread, read from the frame loop."""
+
+    THRESHOLD_MIN = 1.0
+    THRESHOLD_MAX = 60.0
+    THRESHOLD_STEP = 2.0
+
+    def __init__(self, src_w, src_h, cols, rows, threshold):
+        self.src_w, self.src_h = src_w, src_h
+        self.cols, self.rows = cols, rows
+        self.lock = threading.Lock()
+        self.x = 0.0
+        self.y = 0.0
+        self.w = float(src_w)
+        self.h = float(src_h)
+        self.threshold = float(threshold)
+        self.version = 0
+
+    def reset_crop(self):
+        with self.lock:
+            self.x, self.y = 0.0, 0.0
+            self.w, self.h = float(self.src_w), float(self.src_h)
+            self.version += 1
+        self._save()
+
+    def shrink(self, drop_top, drop_left, drop_bottom, drop_right):
+        with self.lock:
+            tw = self.w / self.cols
+            th = self.h / self.rows
+            nx = self.x + (tw if drop_left else 0)
+            ny = self.y + (th if drop_top else 0)
+            nw = self.w - (tw if drop_left else 0) - (tw if drop_right else 0)
+            nh = self.h - (th if drop_top else 0) - (th if drop_bottom else 0)
+            if nw < 16 or nh < 16:
+                return
+            self.x, self.y, self.w, self.h = nx, ny, nw, nh
+            self.version += 1
+        self._save()
+
+    def bump_threshold(self, delta):
+        with self.lock:
+            new = max(self.THRESHOLD_MIN, min(self.THRESHOLD_MAX, self.threshold + delta))
+            changed = new != self.threshold
+            self.threshold = new
+            v = self.threshold
+        if changed:
+            self._save()
+        return v
+
+    def crop(self):
+        with self.lock:
+            x = max(0, int(round(self.x)))
+            y = max(0, int(round(self.y)))
+            w = min(self.src_w - x, int(round(self.w)))
+            h = min(self.src_h - y, int(round(self.h)))
+            return x, y, w, h, self.version
+
+    def get_threshold(self):
+        with self.lock:
+            return self.threshold
+
+    def _save(self):
+        try:
+            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with self.lock:
+                data = {"x": self.x, "y": self.y, "w": self.w, "h": self.h,
+                        "threshold": self.threshold}
+            STATE_PATH.write_text(json.dumps(data))
+        except Exception:
+            pass
+
+    def load(self):
+        try:
+            data = json.loads(STATE_PATH.read_text())
+        except Exception:
+            return
+        with self.lock:
+            self.x = float(data.get("x", 0))
+            self.y = float(data.get("y", 0))
+            self.w = float(data.get("w", self.src_w))
+            self.h = float(data.get("h", self.src_h))
+            if "threshold" in data:
+                self.threshold = float(data["threshold"])
+
+
+def fit(roi, W, H, mode):
+    h, w = roi.shape[:2]
+    if w == 0 or h == 0:
+        return np.zeros((H, W, 3), dtype=np.uint8)
+    if mode == "stretch":
+        return np.asarray(Image.fromarray(roi).resize((W, H), Image.BICUBIC))
+    if mode == "crop":
+        s = max(W / w, H / h)
+        nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+        scaled = np.asarray(Image.fromarray(roi).resize((nw, nh), Image.BICUBIC))
+        x0 = max(0, (nw - W) // 2)
+        y0 = max(0, (nh - H) // 2)
+        return scaled[y0:y0 + H, x0:x0 + W]
+    s = min(W / w, H / h)
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    scaled = np.asarray(Image.fromarray(roi).resize((nw, nh), Image.BICUBIC))
+    out = np.zeros((H, W, 3), dtype=np.uint8)
+    out[(H - nh) // 2:(H - nh) // 2 + nh, (W - nw) // 2:(W - nw) // 2 + nw] = scaled
+    return out
+
+
+def tint_motion(canvas, mask, kw, kh, alpha):
+    if not mask.any():
+        return canvas
+    out = canvas.astype(np.float32)
+    for r, c in zip(*np.where(mask)):
+        ts = out[r * kh:(r + 1) * kh, c * kw:(c + 1) * kw]
+        ts[..., 0] = ts[..., 0] * (1 - alpha) + 255.0 * alpha
+        ts[..., 1] *= (1 - alpha)
+        ts[..., 2] *= (1 - alpha)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def find_xl():
+    for d in DeviceManager().enumerate():
+        if d.deck_type() == "Stream Deck XL":
+            return d
+    sys.exit("Stream Deck XL not found.")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--fps", type=int, default=10)
+    p.add_argument("--mode", choices=["fit", "stretch", "crop"], default="stretch")
+    p.add_argument("--brightness", type=int, default=80)
+    p.add_argument("--no-daemon-mgmt", action="store_true",
+                   help="don't stop/start the streamdeck-linux-gui daemon")
+    p.add_argument("--motion-threshold", type=float, default=10.0)
+    p.add_argument("--motion-alpha", type=float, default=0.40)
+    p.add_argument("--bg-learn-rate", type=float, default=0.05)
+    p.add_argument("--no-motion", action="store_true")
+    args = p.parse_args()
+
+    rtsp_url, cfg_w, cfg_h = load_config()
+
+    src_w, src_h = (cfg_w, cfg_h) if cfg_w and cfg_h else (None, None)
+    if not (src_w and src_h):
+        probed = probe_resolution(rtsp_url)
+        if not probed:
+            sys.exit("Could not detect source resolution. Set src_width/src_height in config.")
+        src_w, src_h = probed
+
+    if not args.no_daemon_mgmt:
+        stop_streamdeck_daemon()
+
+    deck = find_xl()
+    deck.open()
+    deck.reset()
+    deck.set_brightness(args.brightness)
+
+    cols, rows = deck.KEY_COLS, deck.KEY_ROWS
+    kw, kh = deck.KEY_PIXEL_WIDTH, deck.KEY_PIXEL_HEIGHT
+    W, H = cols * kw, rows * kh
+
+    state = State(src_w, src_h, cols, rows, args.motion_threshold)
+    state.load()
+
+    corners = {
+        0:                              (True,  True,  False, False),
+        cols - 1:                       (True,  False, False, True),
+        (rows - 1) * cols:              (False, True,  True,  False),
+        (rows - 1) * cols + cols - 1:   (False, False, True,  True),
+    }
+
+    def on_key(_d, key, pressed):
+        if not pressed:
+            return
+        if key == 1:
+            state.reset_crop()
+            print("[crop] reset", flush=True)
+        elif key == 2:
+            t = state.bump_threshold(+State.THRESHOLD_STEP)
+            print(f"[motion] threshold {t:.1f} (less sensitive)", flush=True)
+        elif key == 3:
+            t = state.bump_threshold(-State.THRESHOLD_STEP)
+            print(f"[motion] threshold {t:.1f} (more sensitive)", flush=True)
+        elif key in corners:
+            state.shrink(*corners[key])
+            x, y, w, h, _ = state.crop()
+            print(f"[crop] key {key} -> ({x},{y}) {w}x{h}", flush=True)
+
+    deck.set_key_callback(on_key)
+
+    print(f"Stream Deck XL: {cols}x{rows} keys, canvas {W}x{H}")
+    print(f"Source: {src_w}x{src_h}, target {args.fps}fps, mode={args.mode}")
+    x, y, w, h, _ = state.crop()
+    print(f"ROI: ({x},{y}) {w}x{h}, motion threshold {state.get_threshold():.1f}")
+
+    ff = subprocess.Popen(
+        ["ffmpeg", "-loglevel", "warning", "-nostdin",
+         "-rtsp_transport", "tcp",
+         "-fflags", "nobuffer", "-flags", "low_delay",
+         "-i", rtsp_url, "-an",
+         "-vf", f"fps={args.fps},format=rgb24",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    threading.Thread(
+        target=lambda: [sys.stderr.write(l.decode("utf-8", "replace")) for l in ff.stderr],
+        daemon=True,
+    ).start()
+
+    frame_size = src_w * src_h * 3
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+
+    bg = None
+    bg_version = -1
+    frames = 0
+    last_log = time.monotonic()
+
+    try:
+        while not stop.is_set():
+            buf = ff.stdout.read(frame_size)
+            if len(buf) < frame_size:
+                break
+            src = np.frombuffer(buf, dtype=np.uint8).reshape((src_h, src_w, 3))
+            x, y, w, h, ver = state.crop()
+            canvas = fit(src[y:y + h, x:x + w], W, H, args.mode)
+
+            mask = np.zeros((rows, cols), dtype=bool)
+            if not args.no_motion:
+                lum = canvas.astype(np.float32).mean(axis=2)
+                if bg is None or ver != bg_version:
+                    bg = lum.copy()
+                    bg_version = ver
+                else:
+                    diff = np.abs(lum - bg)
+                    bg = (1 - args.bg_learn_rate) * bg + args.bg_learn_rate * lum
+                    tile_diff = diff.reshape(rows, kh, cols, kw).mean(axis=(1, 3))
+                    mask = tile_diff > state.get_threshold()
+
+            tinted = tint_motion(canvas, mask, kw, kh, args.motion_alpha)
+
+            for r in range(rows):
+                for c in range(cols):
+                    pil = Image.fromarray(tinted[r * kh:(r + 1) * kh, c * kw:(c + 1) * kw])
+                    native = PILHelper.to_native_key_format(deck, pil)
+                    with deck:
+                        deck.set_key_image(r * cols + c, native)
+
+            frames += 1
+            now = time.monotonic()
+            if now - last_log >= 5.0:
+                print(f"{frames} frames, motion tiles last frame: {int(mask.sum())}",
+                      flush=True)
+                last_log = now
+    finally:
+        try:
+            ff.terminate()
+            ff.wait(timeout=2)
+        except Exception:
+            ff.kill()
+        try:
+            deck.set_key_callback(lambda *_: None)
+            deck.reset()
+            deck.close()
+        except Exception:
+            pass
+        if not args.no_daemon_mgmt:
+            restart_streamdeck_daemon()
+        print(f"stopped after {frames} frames")
+
+
+if __name__ == "__main__":
+    main()

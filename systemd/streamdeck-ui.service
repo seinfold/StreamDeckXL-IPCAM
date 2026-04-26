@@ -1,0 +1,13 @@
+[Unit]
+Description=Stream Deck UI daemon (normal layout)
+Conflicts=streamdeck-camera.service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/streamdeck --no-ui
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
