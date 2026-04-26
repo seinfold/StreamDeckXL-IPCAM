@@ -11,7 +11,7 @@ the deck itself. Five buttons do everything; the rest is config.
 
 | key | what it does |
 | --- | --- |
-| corners (0, 7, 24, 31) | zoom in — the corner you press is the corner that gets cropped away |
+| corners (0, 7, 24, 31) | zoom in, the corner you press is the corner that gets cropped away |
 | 1 (top row, 2nd) | reset crop to the full frame |
 | 2 (top row, 3rd) | less motion sensitivity |
 | 3 (top row, 4th) | more motion sensitivity |
@@ -19,7 +19,7 @@ the deck itself. Five buttons do everything; the rest is config.
 Press the bottom-right corner and the bottom row + right column of the current
 crop disappear; what's left scales up to fill the deck. Press a corner again
 to zoom further. Crop and threshold persist in
-`~/.cache/streamdeck-camera/state.json` — survives reboots.
+`~/.cache/streamdeck-camera/state.json` survives reboots.
 
 ## Setup
 
@@ -95,10 +95,9 @@ slow to respond, pin it manually with `src_width` and `src_height`.
 Per frame: convert to luminance, maintain an EMA "background" of luminance,
 take the absolute diff between current and background, average that diff
 over each 96×96 tile. Tiles whose average exceeds the threshold get the red
-blend. The background is invalidated whenever the crop changes — otherwise
-the first few frames after a zoom would falsely flag everything.
+blend. 
 
-Coarse, but for outdoor scenes you can usually find a threshold (with
+Outdoor scenes you can usually find a threshold (with
 keys 2 and 3) where leaves and clouds stay below the line and people /
 animals trip it.
 
@@ -108,13 +107,13 @@ I run [AGS](https://github.com/Aylur/ags) on Hyprland and added a button
 to the top bar that flips between camera mode and the normal layout.
 The widget is included in this repo:
 
-- [`integrations/ags/streamdeck-camera-button.ts`](integrations/ags/streamdeck-camera-button.ts) — the button widget
-- [`integrations/ags/style.css`](integrations/ags/style.css) — matching CSS
+- [`integrations/ags/streamdeck-camera-button.ts`](integrations/ags/streamdeck-camera-button.ts) the button widget
+- [`integrations/ags/style.css`](integrations/ags/style.css) matching CSS
 
 Drop the `.ts` into your AGS widgets directory, import `StreamdeckCameraButton`,
 add it to your bar's box, and append the CSS to your `style.css`. The button
 shows 󰞮 (md-cctv) when the service is running and 󱡟 (md-cctv-off) when it
-isn't — JetBrainsMono Nerd Font has both, and so do most current Nerd Fonts.
+isn't. Install JetBrainsMono Nerd Font for the icons.
 
 For Hyprland autostart on login:
 
@@ -131,14 +130,14 @@ For Waybar / Eww the same idea is a one-line custom module wrapping
   daemon is still holding the device. Default behaviour is to stop it on
   entry and respawn on exit; pass `--no-daemon-mgmt` to skip.
 - If RTSP connects but no frames flow, the credentials are wrong. The web
-  UI password rarely works for RTSP — most cameras hide a separate "camera
-  account" setting.
+  UI password rarely works for RTSP, most cameras hide a separate "camera
+  account" setting that should be used.
 - `--mode stretch` (the default) distorts the image when you crop. That's
   intentional: cropping rarely lands on a 2:1 aspect ratio anyway, and the
   alternatives (letterbox or fill-and-cut) are less useful for actually
   watching the feed. `--mode fit` and `--mode crop` are there if you want
   them.
-- About 30% of one core for the full 10 FPS pipeline. The bottleneck is
+- The FPS bottleneck is
   encoding 32 small JPEGs and pushing them over USB, not RTSP decoding.
 - Tested and developed for environment that has Linux Arch running Hyprland and AGS with single camera.
 
